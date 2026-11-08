@@ -54,7 +54,12 @@ export class Barracks extends DurableObject {
       me.name = clean(m.name, 8) || '홍길동'; me.rank = num(m.rank, 0, 3) | 0; me.joined = true;
       me.x = num(m.x, -60, 60); me.z = num(m.z, -60, 60); me.f = num(m.f, -7, 7); me.p = '';
       ws.serializeAttachment(me);
-      ws.send(JSON.stringify({ t: 'welcome', id: me.id, peers: this.peers().filter(p => p.id !== me.id) }));
+      const shared = {}; const now = Date.now();
+      for (const [k, v] of await this.ctx.storage.list({ prefix: 'sh:' })) {
+        if (k !== 'sh:gate' && v < now) { await this.ctx.storage.delete(k); continue; }   // 정리 효과가 끝난 침상은 지움
+        shared[k.slice(3)] = v;
+      }
+      ws.send(JSON.stringify({ t: 'welcome', id: me.id, peers: this.peers().filter(p => p.id !== me.id), shared }));
       this.broadcast({ t: 'join', id: me.id, name: me.name, rank: me.rank, x: me.x, z: me.z, f: me.f, p: '' }, ws);
     } else if (m.t === 'pos' && me.joined) {
       me.x = num(m.x, -60, 60); me.z = num(m.z, -60, 60); me.f = num(m.f, -7, 7);
@@ -64,6 +69,14 @@ export class Barracks extends DurableObject {
     } else if (m.t === 'rank' && me.joined) {
       me.rank = num(m.rank, 0, 3) | 0; ws.serializeAttachment(me);
       this.broadcast({ t: 'rank', id: me.id, rank: me.rank }, ws);
+    } else if (m.t === 'set' && me.joined) {
+      // 함께 쓰는 상태: 침상·관물대 정리(s번호.blanket|locker = 정리가 풀리는 시각), 정문(gate = 연 시각, 0이면 닫힘)
+      const k = String(m.k || ''); const now = Date.now();
+      if (!/^s\d{1,3}\.(blanket|locker)$/.test(k) && k !== 'gate') return;
+      let v = num(m.v, 0, now + 86400e3);
+      if (k !== 'gate') v = Math.min(v, now + 600e3);   // 정리는 최대 10분 유지
+      await this.ctx.storage.put('sh:' + k, v);
+      this.broadcast({ t: 'set', id: me.id, k, v }, ws);
     } else if (m.t === 'ping') {
       ws.send('{"t":"pong"}');
     }
