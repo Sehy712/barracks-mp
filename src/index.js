@@ -6,6 +6,9 @@ const ORIGINS = ['https://online-barracks.sutong.workers.dev', 'https://jeojat.a
 const MAX_PLAYERS = 50;
 const SALUTE_RANGE = 6;              // 경례는 이 거리(m) 안에서만 가능
 const SALUTE_COOL = 5 * 60 * 1000;   // 같은 사람에게는 5분에 한 번만 경례 가능 (보내는 쪽 → 받는 쪽, 방향별)
+const CHAT_MAX = 60;                  // 채팅 한 줄 최대 글자 수
+const CHAT_KEEP = 30;                 // 새로 들어온 사람에게 보여 줄 최근 채팅 수
+const CHAT_TTL = 6 * 3600 * 1000;     // 6시간 지난 채팅은 보여 주지 않음
 
 export default {
   async fetch(req, env) {
@@ -25,6 +28,11 @@ export default {
     return new Response('barracks-mp ok', { headers: cors });
   },
 };
+
+// 욕설 필터: 글자 사이에 띄어쓰기·숫자·기호를 끼워도 잡아서 *로 가림 (일상어와 겹치는 '보지 마', '자지 마', '호로록' 등은 제외)
+const BAD_WORDS=['씨발','시발','씨빨','씨팔','시팔','씨바','씌발','쓰발','썅','쌍년','쌍놈','병신','븅신','빙신','등신','좆','존나','존내','졸라','지랄','염병','개새끼','개새기','개색기','개색끼','개쉐','새끼','쌔끼','새키','미친놈','미친년','미친새','개년','개놈','개같','엠창','니미','느금','니애미','니애비','애미뒤','호로새','호로자식','후장','창녀','꺼져','닥쳐','닥치','엿먹','ㅅㅂ','ㅆㅂ','ㅂㅅ','ㅄ','ㅈㄹ','ㅈㄴ','ㅗㅗ','fuck','fuk','fxxk','shit','bitch','asshole','motherfucker'];
+const BAD_RE=new RegExp(BAD_WORDS.map(function(w){ return w.split('').map(function(c){ return c.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'); }).join('[\\s0-9._~!@#$%^&*+=|/,;:\'"`-]*'); }).join('|'),'gi');
+function cleanBad(t){ return String(t).replace(BAD_RE,function(m){ return new Array(m.length+1).join('*'); }); }
 
 const clean = (s, n) => String(s || '').replace(/[<>&"'`\\]/g, '').trim().slice(0, n);
 const num = (v, lo, hi) => { v = Number(v); return Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : 0; };
@@ -62,7 +70,9 @@ export class Barracks extends DurableObject {
         if (k !== 'sh:gate' && v < now) { await this.ctx.storage.delete(k); continue; }   // 정리 효과가 끝난 침상은 지움
         shared[k.slice(3)] = v;
       }
-      ws.send(JSON.stringify({ t: 'welcome', id: me.id, peers: this.peers().filter(p => p.id !== me.id), shared }));
+      const chat = ((await this.ctx.storage.get('chatlog')) || []).filter(c => now - c.at < CHAT_TTL);
+      const peers = this.peers().filter(p => p.id !== me.id).map(p => ({ id: p.id, name: p.name, rank: p.rank, x: p.x, z: p.z, f: p.f, p: p.p }));
+      ws.send(JSON.stringify({ t: 'welcome', id: me.id, peers, shared, chat }));
       this.broadcast({ t: 'join', id: me.id, name: me.name, rank: me.rank, x: me.x, z: me.z, f: me.f, p: '' }, ws);
     } else if (m.t === 'pos' && me.joined) {
       me.x = num(m.x, -60, 60); me.z = num(m.z, -60, 60); me.f = num(m.f, -7, 7);
@@ -93,6 +103,19 @@ export class Barracks extends DurableObject {
       await this.ctx.storage.put(key, now);
       ws.send(JSON.stringify({ t: 'salute_ok', to }));
       try { target.send(JSON.stringify({ t: 'salute', from: me.id })); } catch (e) {}
+    } else if (m.t === 'chat' && me.joined) {
+      // 채팅: 제어문자 제거·길이 제한 · 1초에 1번, 20초에 8번까지
+      let text = String(m.text || '').replace(/[\u0000-\u001f\u007f\u2028\u2029]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, CHAT_MAX);
+      if (!text) return;
+      text = cleanBad(text);
+      const now = Date.now();
+      me.cw = (me.cw || []).filter(t => now - t < 20000);
+      if ((me.cw.length && now - me.cw[me.cw.length - 1] < 1000) || me.cw.length >= 8) { ws.send(JSON.stringify({ t: 'chat_no', why: 'fast' })); return; }
+      me.cw.push(now); ws.serializeAttachment(me);
+      const msg = { t: 'chat', id: me.id, name: me.name, rank: me.rank, text, at: now };
+      const log = (await this.ctx.storage.get('chatlog')) || []; log.push(msg); while (log.length > CHAT_KEEP) log.shift();
+      await this.ctx.storage.put('chatlog', log);
+      this.broadcast(msg, ws);
     } else if (m.t === 'ping') {
       ws.send('{"t":"pong"}');
     }
