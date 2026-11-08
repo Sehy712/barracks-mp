@@ -9,6 +9,7 @@ const SALUTE_COOL = 5 * 60 * 1000;   // 같은 사람에게는 5분에 한 번�
 const CHAT_MAX = 60;                  // 채팅 한 줄 최대 글자 수
 const CHAT_KEEP = 30;                 // 새로 들어온 사람에게 보여 줄 최근 채팅 수
 const CHAT_TTL = 6 * 3600 * 1000;     // 6시간 지난 채팅은 보여 주지 않음
+const DUTY_MAX = 8 * 60 * 1000;       // 외곽 근무 자리는 최대 8분 (이동 + 3분 근무 + 복귀), 지나면 자동 해제
 
 export default {
   async fetch(req, env) {
@@ -72,7 +73,9 @@ export class Barracks extends DurableObject {
       }
       const chat = ((await this.ctx.storage.get('chatlog')) || []).filter(c => now - c.at < CHAT_TTL);
       const peers = this.peers().filter(p => p.id !== me.id).map(p => ({ id: p.id, name: p.name, rank: p.rank, x: p.x, z: p.z, f: p.f, p: p.p }));
-      ws.send(JSON.stringify({ t: 'welcome', id: me.id, peers, shared, chat }));
+      const dt = await this.dutyNow();
+      const duty = dt ? { id: dt.id, name: dt.name, rank: dt.rank, left: Math.ceil((dt.until - now) / 1000) } : null;
+      ws.send(JSON.stringify({ t: 'welcome', id: me.id, peers, shared, chat, duty }));
       this.broadcast({ t: 'join', id: me.id, name: me.name, rank: me.rank, x: me.x, z: me.z, f: me.f, p: '' }, ws);
     } else if (m.t === 'pos' && me.joined) {
       me.x = num(m.x, -60, 60); me.z = num(m.z, -60, 60); me.f = num(m.f, -7, 7);
@@ -116,12 +119,28 @@ export class Barracks extends DurableObject {
       const log = (await this.ctx.storage.get('chatlog')) || []; log.push(msg); while (log.length > CHAT_KEEP) log.shift();
       await this.ctx.storage.put('chatlog', log);
       this.broadcast(msg, ws);
+    } else if (m.t === 'duty_req' && me.joined) {
+      // 외곽 초소 근무: 한 번에 한 명만. 이미 다른 사람이 근무 중이면 거절
+      const now = Date.now(), cur = await this.dutyNow();
+      const mine = cur && (cur.id === me.id || (me.vid && cur.vid === me.vid));
+      if (cur && !mine) { ws.send(JSON.stringify({ t: 'duty_no', id: cur.id, name: cur.name, rank: cur.rank, left: Math.ceil((cur.until - now) / 1000) })); return; }
+      const d = { id: me.id, vid: me.vid || '', name: me.name, rank: me.rank, until: now + DUTY_MAX };
+      await this.ctx.storage.put('duty', d);
+      ws.send(JSON.stringify({ t: 'duty_ok' }));
+      this.broadcast({ t: 'duty', id: d.id, name: d.name, rank: d.rank, left: Math.ceil(DUTY_MAX / 1000) }, ws);
+    } else if (m.t === 'duty_end' && me.joined) {
+      await this.dutyRelease(me);
     } else if (m.t === 'ping') {
       ws.send('{"t":"pong"}');
     }
   }
 
-  leave(ws) { const me = ws.deserializeAttachment(); if (me && me.joined) this.broadcast({ t: 'leave', id: me.id }, ws); }
-  async webSocketClose(ws) { this.leave(ws); try { ws.close(); } catch (e) {} }
-  async webSocketError(ws) { this.leave(ws); }
+  async dutyNow() { const d = await this.ctx.storage.get('duty'); if (d && d.until > Date.now()) return d; if (d) await this.ctx.storage.delete('duty'); return null; }
+  async dutyRelease(me) {
+    const d = await this.ctx.storage.get('duty');
+    if (d && me && d.id === me.id) { await this.ctx.storage.delete('duty'); this.broadcast({ t: 'duty', id: null }); }
+  }
+  leave(ws) { const me = ws.deserializeAttachment(); if (me && me.joined) this.broadcast({ t: 'leave', id: me.id }, ws); return me; }
+  async webSocketClose(ws) { const me = this.leave(ws); await this.dutyRelease(me); try { ws.close(); } catch (e) {} }   // 근무 중 나가면 자리 해제
+  async webSocketError(ws) { const me = this.leave(ws); await this.dutyRelease(me); }
 }
