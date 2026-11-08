@@ -4,6 +4,8 @@ import { DurableObject } from 'cloudflare:workers';
 
 const ORIGINS = ['https://online-barracks.sutong.workers.dev', 'https://jeojat.altolab.ai'];
 const MAX_PLAYERS = 50;
+const SALUTE_RANGE = 6;              // 경례는 이 거리(m) 안에서만 가능
+const SALUTE_COOL = 5 * 60 * 1000;   // 같은 사람에게는 5분에 한 번만 경례 가능 (보내는 쪽 → 받는 쪽, 방향별)
 
 export default {
   async fetch(req, env) {
@@ -52,6 +54,7 @@ export class Barracks extends DurableObject {
     const me = ws.deserializeAttachment(); if (!me) return;
     if (m.t === 'hello') {
       me.name = clean(m.name, 8) || '홍길동'; me.rank = num(m.rank, 0, 3) | 0; me.joined = true;
+      me.vid = clean(m.vid, 40);   // 브라우저 고유값 (재접속해도 같은 값 → 경례 쿨타임 우회 방지)
       me.x = num(m.x, -60, 60); me.z = num(m.z, -60, 60); me.f = num(m.f, -7, 7); me.p = '';
       ws.serializeAttachment(me);
       const shared = {}; const now = Date.now();
@@ -77,6 +80,19 @@ export class Barracks extends DurableObject {
       if (k !== 'gate') v = Math.min(v, now + 600e3);   // 정리는 최대 10분 유지
       await this.ctx.storage.put('sh:' + k, v);
       this.broadcast({ t: 'set', id: me.id, k, v }, ws);
+    } else if (m.t === 'salute' && me.joined) {
+      // 경례: 가까이 있는 전우에게만, 같은 상대에게는 5분에 한 번
+      const to = String(m.to || '').slice(0, 40);
+      const target = this.ctx.getWebSockets().find(w => { const a = w.deserializeAttachment(); return a && a.joined && a.id === to; });
+      const ta = target && target.deserializeAttachment();
+      if (!ta || ta.id === me.id) return;
+      if (Math.hypot(ta.x - me.x, ta.z - me.z) > SALUTE_RANGE) { ws.send(JSON.stringify({ t: 'salute_no', to, why: 'far' })); return; }
+      const key = 'sal:' + (me.vid || me.id) + '>' + (ta.vid || ta.id), now = Date.now();
+      const last = await this.ctx.storage.get(key);
+      if (last && now - last < SALUTE_COOL) { ws.send(JSON.stringify({ t: 'salute_no', to, why: 'cool', left: Math.ceil((SALUTE_COOL - (now - last)) / 1000) })); return; }
+      await this.ctx.storage.put(key, now);
+      ws.send(JSON.stringify({ t: 'salute_ok', to }));
+      try { target.send(JSON.stringify({ t: 'salute', from: me.id })); } catch (e) {}
     } else if (m.t === 'ping') {
       ws.send('{"t":"pong"}');
     }
