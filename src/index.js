@@ -64,7 +64,7 @@ export class Barracks extends DurableObject {
     if (m.t === 'hello') {
       me.name = clean(m.name, 8) || '홍길동'; me.rank = num(m.rank, 0, 3) | 0; me.joined = true;
       me.vid = clean(m.vid, 40);   // 브라우저 고유값 (재접속해도 같은 값 → 경례 쿨타임 우회 방지)
-      me.x = num(m.x, -60, 60); me.z = num(m.z, -60, 60); me.f = num(m.f, -7, 7); me.p = '';
+      me.x = num(m.x, -150, 150); me.z = num(m.z, -150, 150); /* 외곽 초소(약 z 86)까지 위치 전달 */ me.f = num(m.f, -7, 7); me.p = '';
       ws.serializeAttachment(me);
       const shared = {}; const now = Date.now();
       for (const [k, v] of await this.ctx.storage.list({ prefix: 'sh:' })) {
@@ -78,7 +78,7 @@ export class Barracks extends DurableObject {
       ws.send(JSON.stringify({ t: 'welcome', id: me.id, peers, shared, chat, duty }));
       this.broadcast({ t: 'join', id: me.id, name: me.name, rank: me.rank, x: me.x, z: me.z, f: me.f, p: '' }, ws);
     } else if (m.t === 'pos' && me.joined) {
-      me.x = num(m.x, -60, 60); me.z = num(m.z, -60, 60); me.f = num(m.f, -7, 7);
+      me.x = num(m.x, -150, 150); me.z = num(m.z, -150, 150); /* 외곽 초소(약 z 86)까지 위치 전달 */ me.f = num(m.f, -7, 7);
       me.p = m.p === 'prone' || m.p === 'supine' ? m.p : '';
       ws.serializeAttachment(me);
       this.broadcast({ t: 'pos', id: me.id, x: me.x, z: me.z, f: me.f, p: me.p }, ws);
